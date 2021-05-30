@@ -6,17 +6,32 @@ use bindings::{
 };
 use std::ffi::c_void;
 use std::mem;
+use std::ops::{Index, IndexMut};
 
-struct Buffer {
+struct CodeBuffer {
     addr: *mut u8,
-    offset: isize,
-    protections: PAGE_TYPE,
+    len: usize,
+    protected: bool,
     size: usize,
 }
 
-impl Buffer {
+impl Index<usize> for CodeBuffer {
+    type Output = u8;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        unsafe { & *self.addr.offset(index as isize) }
+    }
+}
+
+impl IndexMut<usize> for CodeBuffer {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        unsafe { &mut *self.addr.offset(index as isize) }
+    }
+}
+
+impl CodeBuffer {
     #[cfg(target_os = "windows")]
-    pub fn new(size: usize) -> Self {
+    fn alloc_with_size(size: usize) -> Self {
         let addr: *mut u8;
         let protections = PAGE_TYPE::from(PAGE_READWRITE);
 
@@ -27,7 +42,7 @@ impl Buffer {
                 std::ptr::null_mut(),
                 size,
                 VIRTUAL_ALLOCATION_TYPE::from(MEM_RESERVE | MEM_COMMIT),
-                protections
+                protections,
             );
 
             if raw_addr.is_null() {
@@ -36,27 +51,36 @@ impl Buffer {
 
             addr = mem::transmute(raw_addr);
         }
-        println!("{:?}", addr);
-        Buffer {
+
+        Self {
             addr: addr,
-            offset: 0,
-            protections: protections,
+            len: 0,
+            protected: true,
             size: size,
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn alloc_with_size(size: usize) -> Self {
+
+    }
+
+    pub fn new() -> Self {
+        Self::alloc_with_size(100)
+    }
+
     pub fn load(&mut self, code: Vec<u8>) -> bool {
-        if  self.offset + (code.len() as isize) >= self.size as isize {
+        if  self.len + code.len() >= self.size {
             return false;
         }
 
-        if self.protections != PAGE_TYPE::from(PAGE_READWRITE) {
-            self.change_protect(PAGE_TYPE::from(PAGE_READWRITE));
+        if !self.protected {
+            self.change_protect(true);
         }
 
         for byte in code.into_iter() {
-            unsafe { *self.addr.offset(self.offset) = byte; }
-            self.offset += 1;
+            unsafe { *self.addr.offset(self.len as isize) = byte; }
+            self.len += 1;
         }
 
         return true;
@@ -73,23 +97,30 @@ impl Buffer {
         return self.load(vals);
     }
 
-    pub fn run(&mut self) {
-
-        if self.protections != PAGE_TYPE::from(PAGE_EXECUTE_READ) {
-            self.change_protect(PAGE_TYPE::from(PAGE_EXECUTE_READ));
+    pub fn to_fn(&mut self) -> unsafe extern "C" fn() -> u8 {
+        if self.protected {
+            self.change_protect(false);
         }
 
         unsafe {
             let func: unsafe extern "C" fn() -> u8 = mem::transmute(self.addr);
-            let result = func();
-
-            println!("{}", result);
+            return func;
         }
-
     }
 
     #[cfg(target_os = "windows")]
-    fn change_protect(&mut self, new_prot: PAGE_TYPE) {
+    fn change_protect(&mut self, protect: bool) {
+        let new_prot: PAGE_TYPE;
+        let mut old_prot: PAGE_TYPE;
+
+        if protect {
+            new_prot = PAGE_TYPE::from(PAGE_READWRITE);
+            old_prot = PAGE_TYPE::from(PAGE_EXECUTE_READ);
+        } else {
+            new_prot = PAGE_TYPE::from(PAGE_EXECUTE_READ);
+            old_prot = PAGE_TYPE::from(PAGE_READWRITE);
+        }
+
         unsafe {
             let raw_addr: *mut c_void = mem::transmute(self.addr);
             
@@ -97,10 +128,10 @@ impl Buffer {
                 raw_addr,
                 self.size,
                 new_prot,
-                &mut self.protections
+                &mut old_prot
             );
 
-            self.protections = new_prot;
+            self.protected = protect;
 
             if result == false {
                 panic!("VirtualProtect call failed");
@@ -111,7 +142,7 @@ impl Buffer {
 
 fn main() -> windows::Result<()> {
 
-    let mut buf = Buffer::new(100);
+    let mut buf = CodeBuffer::new();
 
     buf.push_u8(0xb8);
     buf.push_u8(0x80);
@@ -120,7 +151,9 @@ fn main() -> windows::Result<()> {
     buf.push_u8(0x00);
     buf.push_u8(0xc3);
 
-    buf.run();
+    let func: unsafe extern "C" fn() -> u8 = buf.to_fn();
+
+    unsafe { println!("{}", func()); }
 
     Ok(())
 }
