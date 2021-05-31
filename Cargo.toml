@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 bindings = { path = "bindings" }
 windows = "0.10.0"
+libc = "0.2"
